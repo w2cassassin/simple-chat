@@ -13,7 +13,7 @@ function App() {
   };
 
   return (
-    <Router>
+    <Router basename="/chat">
       <div className="App">
         <Switch>
           <Route exact path="/">
