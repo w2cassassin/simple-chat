@@ -1,0 +1,9 @@
+fastapi==0.68.1
+uvicorn==0.15.0
+sqlalchemy==1.4.23
+aiosqlite==0.17.0
+asyncio==3.4.3
+python-jose==3.3.0
+passlib==1.7.4
+python-multipart==0.0.5
+websockets==10.0
