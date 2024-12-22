@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(root_path=os.getenv('ROOT_PATH', '/chat/api'))
+app = FastAPI(root_path=os.getenv("ROOT_PATH"))
 
 app.add_middleware(
     CORSMiddleware,
