@@ -1,122 +1,139 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import config from '../config';
+import { useNavigate } from 'react-router-dom';
 
-function Chat({ username }) {
+function Chat({ username, onLogout }) {
+  const navigate = useNavigate();
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
-  const [activeUsers, setActiveUsers] = useState([]);
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const [selectedUser, setSelectedUser] = useState(null);
-  const [newChatUsername, setNewChatUsername] = useState('');
-  const [showOnlineUsers, setShowOnlineUsers] = useState(false);
-  const [chatHistory, setChatHistory] = useState([]);
+  const [chats, setChats] = useState([]);
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const [manualRecipient, setManualRecipient] = useState('');
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  }, []);
 
   useEffect(() => {
-    wsRef.current = new WebSocket(`${config.WS_BASE_URL}/ws/${username}`);
-
-    wsRef.current.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'users_list') {
-        setActiveUsers(data.users.filter(user => user !== username));
-      } else if (data.type === 'message') {
-        setMessages(prevMessages => [...prevMessages, data]);
+    const loadChats = async () => {
+      try {
+        const response = await axios.get(`${config.API_BASE_URL}/chats/${username}`);
+        setChats(response.data);
+      } catch (error) {
+        console.error('Error loading chats:', error);
       }
     };
-
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
+    loadChats();
   }, [username]);
 
-  const loadChatMessages = async (otherUser) => {
-    if (!otherUser) return;
-    try {
-      const response = await axios.get(`${config.API_BASE_URL}/messages/${username}/${otherUser}`);
-      setMessages(response.data);
-    } catch (error) {
-      console.error('Error loading chat messages:', error);
-    }
-  };
+  const updateChats = useCallback((newMessage, otherUser) => {
+    setChats(prev => {
+      const newChats = prev.filter(chat => chat.user !== otherUser);
+      return [{
+        user: otherUser,
+        last_message: newMessage.content,
+        timestamp: newMessage.timestamp,
+        unread: false
+      }, ...newChats];
+    });
+  }, []);
 
-  const loadChatHistory = async () => {
-    try {
-      const response = await axios.get(`${config.API_BASE_URL}/messages/${username}`);
-      const messages = response.data;
-      
-      const uniqueUsers = new Set();
-      messages.forEach(msg => {
-        if (msg.sender_name === username) {
-          uniqueUsers.add(msg.receiver_name);
-        } else {
-          uniqueUsers.add(msg.sender_name);
-        }
-      });
-      
-      const history = Array.from(uniqueUsers).map(user => {
-        const lastMessage = messages
-          .filter(msg => 
-            (msg.sender_name === user && msg.receiver_name === username) ||
-            (msg.sender_name === username && msg.receiver_name === user)
-          )
-          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0];
-        
-        return {
-          user,
-          lastMessage: lastMessage?.content || '',
-          timestamp: lastMessage?.timestamp || '',
-        };
-      }).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-      setChatHistory(history);
-    } catch (error) {
-      console.error('Error loading chat history:', error);
+  const handleWebSocketMessage = useCallback((data) => {
+    if (data.type === 'users_list') {
+      setOnlineUsers(data.users.filter(user => user !== username));
+    } else if (data.type === 'new_message') {
+      if (data.sender_name === selectedUser || data.receiver_name === selectedUser) {
+        setMessages(prev => [...prev, data]);
+        scrollToBottom();
+      }
+      const otherUser = data.sender_name === username ? data.receiver_name : data.sender_name;
+      updateChats(data, otherUser);
     }
-  };
+  }, [username, selectedUser, scrollToBottom, updateChats]);
+
+  useEffect(() => {
+    const ws = new WebSocket(`${config.WS_BASE_URL}/ws/${username}`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      handleWebSocketMessage(data);
+    };
+
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      ws.close();
+    };
+  }, [username, handleWebSocketMessage]);
 
   useEffect(() => {
     if (selectedUser) {
-      loadChatMessages(selectedUser);
+      axios.get(`${config.API_BASE_URL}/messages/${username}?with_user=${selectedUser}`)
+        .then(response => {
+          setMessages(response.data.messages);
+          scrollToBottom();
+        });
     }
-    scrollToBottom();
-  }, [selectedUser]);
+  }, [selectedUser, username, scrollToBottom]);
 
   useEffect(() => {
-    loadChatHistory();
-  }, [messages]);
+    axios.get(`${config.API_BASE_URL}/users/online`)
+      .then(response => {
+        setOnlineUsers(response.data.users.filter(user => user !== username));
+      });
+  }, [username]);
 
-  const sendMessage = (e) => {
+  const sendMessage = async (e) => {
     e.preventDefault();
-    if (!selectedUser || !newMessage.trim() || !wsRef.current) return;
+    const targetUser = selectedUser || manualRecipient.trim();
+    if (!targetUser || !newMessage.trim()) return;
 
-    const messageData = {
-      content: newMessage.trim(),
-      receiver: selectedUser
-    };
-
-    if (wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(messageData));
+    try {
+      const response = await axios.post(
+        `${config.API_BASE_URL}/messages/`, 
+        {
+          content: newMessage.trim(),
+          receiver_name: targetUser
+        },
+        {
+          headers: {
+            'Username': username,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
       setNewMessage('');
-    } else {
-      console.error('WebSocket is not connected');
+      setMessages(prev => [...prev, response.data]);
+      updateChats(response.data, targetUser);
+      scrollToBottom();
+    } catch (error) {
+      console.error('Error sending message:', error);
     }
   };
 
   const startNewChat = (e) => {
     e.preventDefault();
-    if (newChatUsername.trim() && newChatUsername !== username) {
-      setSelectedUser(newChatUsername);
-      setNewChatUsername('');
-      setMessages([]);
-      loadChatMessages(newChatUsername);
+    if (manualRecipient.trim()) {
+      setSelectedUser(manualRecipient.trim());
+      setManualRecipient('');
     }
+  };
+
+  const handleLogout = () => {
+    wsRef.current?.close();
+    onLogout();
+    navigate('/login');
   };
 
   return (
@@ -124,67 +141,54 @@ function Chat({ username }) {
       <div className="sidebar">
         <div className="current-user">
           <h3>Ваш ник: {username}</h3>
+          <button onClick={handleLogout} style={{ marginTop: '8px' }}>Выйти</button>
         </div>
         
+        <div className="chats-list">
+          <h3>Чаты</h3>
+          {chats.map(chat => (
+            <div
+              key={chat.user}
+              className={`chat-item ${selectedUser === chat.user ? 'active' : ''}`}
+              onClick={() => setSelectedUser(chat.user)}
+            >
+              <div className="chat-item-info">
+                <div className="chat-item-name">
+                  {chat.user} 
+                  {onlineUsers.includes(chat.user) && <span className="online-badge">●</span>}
+                </div>
+                <div className="chat-item-last-message">{chat.last_message}</div>
+              </div>
+              <div className="chat-item-time">
+                {new Date(chat.timestamp).toLocaleTimeString()}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="online-users">
+          <h3>Онлайн ({onlineUsers.length})</h3>
+          {onlineUsers.map(user => (
+            <div
+              key={user}
+              className="online-user-item"
+              onClick={() => { setSelectedUser(user); setManualRecipient(''); }}
+            >
+              {user} <span className="online-badge">●</span>
+            </div>
+          ))}
+        </div>
+
         <div className="new-chat-form">
           <form onSubmit={startNewChat}>
             <input
               type="text"
-              value={newChatUsername}
-              onChange={(e) => setNewChatUsername(e.target.value)}
-              placeholder="Введите ник пользователя..."
+              placeholder="Введите ник для чата"
+              value={manualRecipient}
+              onChange={(e) => setManualRecipient(e.target.value)}
             />
             <button type="submit">Начать чат</button>
           </form>
-        </div>
-
-        <button 
-          className="show-online-users-btn"
-          onClick={() => setShowOnlineUsers(!showOnlineUsers)}
-        >
-          Показать пользователей онлайн ({activeUsers.length})
-        </button>
-
-        {showOnlineUsers && (
-          <div className="online-users-modal">
-            <div className="modal-content">
-              <h3>Пользователи онлайн</h3>
-              {activeUsers.map(user => (
-                <div
-                  key={user}
-                  className="online-user-item"
-                  onClick={() => {
-                    setSelectedUser(user);
-                    setShowOnlineUsers(false);
-                  }}
-                >
-                  {user} <span className="online-badge">●</span>
-                </div>
-              ))}
-              <button onClick={() => setShowOnlineUsers(false)}>Закрыть</button>
-            </div>
-          </div>
-        )}
-
-        <div className="recent-chats">
-          <h3>История чатов</h3>
-          {chatHistory.map(({ user, lastMessage, timestamp }) => (
-            <div
-              key={user}
-              className={`chat-item ${selectedUser === user ? 'active' : ''}`}
-              onClick={() => setSelectedUser(user)}
-            >
-              <div className="chat-item-info">
-                <div className="chat-item-name">
-                  {user} {activeUsers.includes(user) && <span className="online-badge">●</span>}
-                </div>
-                <div className="chat-item-last-message">{lastMessage}</div>
-              </div>
-              <div className="chat-item-time">
-                {new Date(timestamp).toLocaleTimeString()}
-              </div>
-            </div>
-          ))}
         </div>
       </div>
 
@@ -192,7 +196,7 @@ function Chat({ username }) {
         {selectedUser ? (
           <>
             <div className="chat-header">
-              <h3>Чат с {selectedUser} {activeUsers.includes(selectedUser) && <span className="online-badge">●</span>}</h3>
+              <h3>Чат с {selectedUser}</h3>
             </div>
             <div className="messages">
               {messages.map((msg, index) => (
@@ -220,7 +224,7 @@ function Chat({ username }) {
           </>
         ) : (
           <div className="no-chat-selected">
-            Введите ник пользователя для начала общения
+            Выберите пользователя для начала общения
           </div>
         )}
       </div>
